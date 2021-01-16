@@ -66,9 +66,30 @@ impl GameState {
         }
     }
 }
-
+const TEXTURE_NAMES: &[&str] = &[
+    "hex-dwarf_alt.png",
+    "square-dwarf.png",
+    "hex-trees.png",
+    "hex-floor-dirt.png",
+    "dwarf.png",
+    "hex-floor-grass_alt.png",
+    "square-floor_alt.png",
+    "square-wall.png",
+    "hex-boulder_alt.png",
+    "hex-trees_alt.png",
+    "hex-floor-dirt_alt.png",
+    "hex-dwarf.png",
+    "square-floor.png",
+    "hex-floor-grass.png",
+    "hex-boulder.png",
+];
+use std::path::Path;
 fn setup(mut tile_sprite_handles: ResMut<TileSpriteHandles>, asset_server: Res<AssetServer>) {
-    tile_sprite_handles.handles = asset_server.load_folder("textures").unwrap();
+    // tile_sprite_handles.handles = asset_server.load_folder("textures").unwrap();
+    for name in TEXTURE_NAMES.iter() {
+        let x = asset_server.load_untyped(Path::new(&format!("textures/{}", name)));
+        tile_sprite_handles.handles.push(x);
+    }
 }
 
 fn load(
@@ -333,23 +354,23 @@ fn character_movement(
 }
 
 fn main() {
-    App::build()
-        .add_resource(WindowDescriptor {
-            title: "Endless Dungeon".to_string(),
-            width: 1024.,
-            height: 1024.,
-            vsync: false,
-            resizable: true,
-            mode: WindowMode::Windowed,
-            ..Default::default()
-        })
-        .init_resource::<TileSpriteHandles>()
-        .init_resource::<GameState>()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(TilemapDefaultPlugins)
-        .add_startup_system(setup.system())
-        .add_system(load.system())
-        .add_system(build_random_dungeon.system())
-        .add_system(character_movement.system())
-        .run()
+    let mut app = App::build();
+    app.add_resource(WindowDescriptor {
+        title: "Endless Dungeon".to_string(),
+        width: 1024.,
+        height: 1024.,
+        vsync: false,
+        resizable: true,
+        mode: WindowMode::Windowed,
+        ..Default::default()
+    })
+    .init_resource::<TileSpriteHandles>()
+    .init_resource::<GameState>()
+    .add_plugins(bevy_webgl2::DefaultPlugins)
+    .add_plugins(TilemapDefaultPlugins)
+    .add_startup_system(setup.system())
+    .add_system(load.system())
+    .add_system(build_random_dungeon.system())
+    .add_system(character_movement.system())
+    .run()
 }
