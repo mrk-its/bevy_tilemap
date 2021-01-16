@@ -37,6 +37,8 @@ pub(crate) struct ChunkBundle {
     pub(crate) global_transform: GlobalTransform,
     /// If a layer has been modified, all are set here.
     pub(crate) modified_layer: ModifiedLayer,
+    pub(crate) rigid_body: RigidBodyBuilder,
+    // pub(crate) collider: ColliderBuilder,
 }
 
 impl Default for ChunkBundle {
@@ -57,6 +59,8 @@ impl Default for ChunkBundle {
             main_pass: MainPass,
             global_transform: Default::default(),
             modified_layer: Default::default(),
+            rigid_body: RigidBodyBuilder::new_static(),
+            // collider: ColliderBuilder::trimesh(Vec::new(), Vec::new())
         }
     }
 }

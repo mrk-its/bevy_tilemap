@@ -144,6 +144,8 @@ impl Display for ErrorKind {
     }
 }
 
+impl Error for ErrorKind {}
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 /// The error type for operations when interacting with the tilemap.
 pub struct TilemapError(pub Box<ErrorKind>);
@@ -154,7 +156,11 @@ impl Display for TilemapError {
     }
 }
 
-impl Error for TilemapError {}
+impl Error for TilemapError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
+}
 
 impl From<ErrorKind> for TilemapError {
     fn from(kind: ErrorKind) -> TilemapError {
@@ -187,6 +193,8 @@ enum ChunkEvent {
     Despawned {
         /// The entities that need to be despawned.
         entities: Vec<Entity>,
+        /// The point of the chunk to despawn.
+        point: Point2,
     },
 }
 
@@ -215,6 +223,23 @@ impl Default for AutoFlags {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TilemapLayer {
+    pub kind: LayerKind,
+    pub interaction_groups: InteractionGroups,
+}
+
+impl Default for TilemapLayer {
+    fn default() -> TilemapLayer {
+        TilemapLayer {
+            kind: LayerKind::Dense,
+            interaction_groups: InteractionGroups::default(),
+        }
+    }
+}
+
 /// A Tilemap which maintains chunks and its tiles within.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
@@ -229,11 +254,13 @@ pub struct Tilemap {
     tile_dimensions: Dimension2,
     /// The layers that are currently set in the tilemap in order from lowest
     /// to highest.
-    layers: Vec<Option<LayerKind>>,
+    layers: Vec<Option<TilemapLayer>>,
     /// Auto flags used for different automated features.
     auto_flags: AutoFlags,
     /// Dimensions of chunks to spawn from camera transform.
     auto_spawn: Option<Dimension2>,
+    /// Custom flags.
+    custom_flags: Vec<u32>,
     #[cfg_attr(feature = "serde", serde(skip))]
     /// The handle of the texture atlas.
     texture_atlas: Handle<TextureAtlas>,
@@ -318,7 +345,7 @@ pub struct TilemapBuilder {
     /// The amount of z layers.
     z_layers: usize,
     /// The layers to be set. If there are more, it will override `z_layers`.
-    layers: Option<HashMap<usize, LayerKind>>,
+    layers: Option<HashMap<usize, TilemapLayer>>,
     /// If the tilemap currently has a sprite sheet handle on it or not.
     texture_atlas: Option<Handle<TextureAtlas>>,
     /// True if this tilemap will automatically configure.
@@ -469,12 +496,12 @@ impl TilemapBuilder {
     /// ```
     ///
     /// [`LayerKind`]: crate::chunk::LayerKind
-    pub fn add_layer(mut self, kind: LayerKind, z_layer: usize) -> TilemapBuilder {
+    pub fn add_layer(mut self, layer: TilemapLayer, z_order: usize) -> TilemapBuilder {
         if let Some(layers) = &mut self.layers {
-            layers.insert(z_layer, kind);
+            layers.insert(z_order, layer);
         } else {
             let mut layers = HashMap::default();
-            layers.insert(z_layer, kind);
+            layers.insert(z_order, layer);
             self.layers = Some(layers);
         }
         self
@@ -605,6 +632,8 @@ impl TilemapBuilder {
             layers: vec![None; z_layers],
             auto_flags: self.auto_flags,
             auto_spawn: self.auto_spawn,
+            // interaction_groups: Vec::new(),
+            custom_flags: Vec::new(),
             texture_atlas,
             chunks: Default::default(),
             entities: Default::default(),
@@ -613,8 +642,8 @@ impl TilemapBuilder {
         };
 
         if let Some(mut layers) = self.layers {
-            for (z_layer, kind) in layers.drain() {
-                tilemap.add_layer_with_kind(kind, z_layer)?;
+            for (z_layer, layer) in layers.drain() {
+                tilemap.add_layer(layer, z_layer)?;
             }
         }
 
@@ -636,6 +665,7 @@ impl Default for Tilemap {
             layers: vec![None; DEFAULT_Z_LAYERS],
             auto_flags: AutoFlags::NONE,
             auto_spawn: None,
+            custom_flags: Vec::new(),
             texture_atlas: Handle::default(),
             chunks: Default::default(),
             entities: Default::default(),
@@ -786,7 +816,8 @@ impl Tilemap {
         if let Some(dimensions) = &self.dimensions {
             dimensions.check_point(point)?;
         }
-        let chunk = Chunk::new(point, &self.layers, self.chunk_dimensions);
+        let layer_kinds = self.layers.iter().map(|x| x.and_then(|y| Some(y.kind))).collect::<Vec<Option<LayerKind>>>();
+        let chunk = Chunk::new(point, &layer_kinds, self.chunk_dimensions);
         match self.chunks.insert(point, chunk) {
             Some(_) => Err(ErrorKind::ChunkAlreadyExists(point).into()),
             None => Ok(()),
@@ -845,12 +876,18 @@ impl Tilemap {
     /// ```
     ///
     /// [`LayerKind`]: crate::chunk::LayerKind
+    #[deprecated(since = "0.4.0", note = "Please use `add_layer` method instead with the `TilemapLayer` struct")]
     pub fn add_layer_with_kind(&mut self, kind: LayerKind, z_order: usize) -> TilemapResult<()> {
+        let layer = TilemapLayer {
+            kind,
+            interaction_groups: InteractionGroups::default(),
+            ..Default::default()
+        };
         if let Some(some_kind) = self.layers.get_mut(z_order) {
             if some_kind.is_some() {
                 return Err(ErrorKind::LayerExists(z_order).into());
             }
-            *some_kind = Some(kind);
+            *some_kind = Some(layer);
         }
 
         for chunk in self.chunks.values_mut() {
@@ -896,8 +933,19 @@ impl Tilemap {
     /// [`add_layer_with_kind`]: Tilemap::add_layer_with_kind
     /// [`LayerKind`]: crate::chunk::LayerKind
     /// [`LayerKind::Sparse`]: crate::chunk::LayerKind::Sparse
-    pub fn add_layer(&mut self, z_layer: usize) -> TilemapResult<()> {
-        self.add_layer_with_kind(LayerKind::Dense, z_layer)
+    pub fn add_layer(&mut self, layer: TilemapLayer, z_order: usize) -> TilemapResult<()> {
+        if let Some(inner_layer) = self.layers.get_mut(z_order) {
+            if inner_layer.is_some() {
+                return Err(ErrorKind::LayerExists(z_order).into());
+            }
+            *inner_layer = Some(layer);
+        }
+
+        for chunk in self.chunks.values_mut() {
+            chunk.add_layer(&layer.kind, z_order, self.chunk_dimensions)
+        }
+
+        Ok(())
     }
 
     /// Moves a layer from one Z level to another.
@@ -1117,7 +1165,7 @@ impl Tilemap {
 
         if let Some(chunk) = self.chunks.get_mut(&point) {
             let entities = chunk.get_entities();
-            self.events.send(ChunkEvent::Despawned { entities })
+            self.events.send(ChunkEvent::Despawned { entities, point })
         }
 
         Ok(())
@@ -1268,7 +1316,7 @@ impl Tilemap {
 
             if let Some(layer) = self.layers.get(tile.z_order as usize) {
                 if layer.as_ref().is_none() {
-                    self.add_layer(tile.z_order as usize)?;
+                    self.add_layer(TilemapLayer::default(), tile.z_order as usize)?;
                 }
             } else {
                 return Err(ErrorKind::LayerDoesNotExist(tile.z_order).into());
@@ -1303,7 +1351,10 @@ impl Tilemap {
             let chunk = if self.auto_flags.contains(AutoFlags::AUTO_CHUNK) {
                 self.chunks
                     .entry(point)
-                    .or_insert_with(|| Chunk::new(point, &layers, chunk_dimensions))
+                    .or_insert_with(|| {
+                        let layer_kinds = layers.iter().map(|x| x.and_then(|y| Some(y.kind))).collect::<Vec<Option<LayerKind>>>();
+                        Chunk::new(point, &layer_kinds, chunk_dimensions)}
+                    )
             } else {
                 match self.chunks.get_mut(&point) {
                     Some(c) => c,
@@ -1314,11 +1365,8 @@ impl Tilemap {
             let mut layers = HashMap::default();
             for tile in tiles.into_iter() {
                 let index = self.chunk_dimensions.encode_point_unchecked(tile.point);
-                let raw_tile = RawTile {
-                    index: tile.sprite_index,
-                    color: tile.tint,
-                };
-                chunk.set_raw_tile(tile.z_order, index, raw_tile);
+                // TODO: Tile collider must be added to the chunk.
+                chunk.set_tile(index, tile);
                 if let Some(entity) = chunk.get_entity(tile.z_order) {
                     layers.entry(tile.z_order).or_insert(entity);
                 }
@@ -1841,7 +1889,7 @@ pub(crate) fn tilemap_auto_configure(
         let atlas = if let Some(atlas) = texture_atlases.get(&map.texture_atlas) {
             atlas
         } else {
-            error!(target: "tilemap_events", "`TextureAtlas` for the tilemap is missing, can not auto configure");
+            error!("`TextureAtlas` for the tilemap is missing, can not auto configure");
             return;
         };
 
@@ -1861,7 +1909,7 @@ pub(crate) fn tilemap_auto_configure(
 
         for size in sizes.into_iter() {
             if size % base_size != 0 {
-                error!(target: "tilemap_events", "the tiles in the set `TextureAtlas` must be divisible by the smallest itle, can not auto configure");
+                error!("the tiles in the set `TextureAtlas` must be divisible by the smallest itle, can not auto configure");
                 map.auto_flags.toggle(AutoFlags::AUTO_CONFIGURE);
                 return;
             }
@@ -1911,8 +1959,8 @@ pub(crate) fn tilemap(
                 Spawned { ref point } => {
                     spawned_chunks.push(*point);
                 }
-                Despawned { ref entities } => {
-                    despawned_chunks.push(entities.clone());
+                Despawned { ref entities, ref point } => {
+                    despawned_chunks.push((entities.clone(), *point));
                 }
             }
         }
@@ -1934,7 +1982,7 @@ pub(crate) fn tilemap(
             let chunk = if let Some(chunk) = tilemap.chunks.get_mut(&point) {
                 chunk
             } else {
-                warn!(target: "tilemap_events", "can not get chunk at {}, skipping", &point);
+                warn!("Can not get chunk at {}, skipping", &point);
                 continue;
             };
             let mut entities = Vec::with_capacity(capacity);
@@ -1945,7 +1993,7 @@ pub(crate) fn tilemap(
                 {
                     parts
                 } else {
-                    warn!(target: "tilemap_events", "can not split tiles to data for the renderer");
+                    warn!("Can not split tiles to data for the renderer");
                     continue;
                 };
                 mesh.set_attribute(ChunkMesh::ATTRIBUTE_TILE_INDEX, indexes);
@@ -2006,9 +2054,11 @@ pub(crate) fn tilemap(
                 {
                     entity
                 } else {
-                    error!(target: "tilemap_events", "entity does not exist unexpectedly, can not run the tilemap system");
+                    error!("Chunk entity does not exist unexpectedly, can not run the tilemap system");
                     return;
                 };
+
+                info!("Chunk {} spawned", point);
 
                 chunk.add_entity(z, entity);
                 entities.push(entity);
@@ -2021,17 +2071,18 @@ pub(crate) fn tilemap(
                 let mut modified_layer = if let Ok(layer) = layer_query.get_mut(entity) {
                     layer
                 } else {
-                    warn!(target: "tilemap_events", "layer does not exist in ECS, skipping");
+                    warn!("Chunk layer does not exist, skipping");
                     continue;
                 };
                 modified_layer.0 += 1;
             }
         }
 
-        for entities in despawned_chunks.into_iter() {
+        for (entities, point) in despawned_chunks.into_iter() {
             for entity in entities {
                 commands.despawn(entity);
             }
+            info!("Chunk {} despawned", point);
         }
     }
 }
